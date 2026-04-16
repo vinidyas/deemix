@@ -51,6 +51,11 @@ function selectedLinks() {
 	}
 	return selected.join(";");
 }
+function getSpotifyTrackStatusLabel(track) {
+	return track.spotifyDownloadStatus?.downloaded
+		? t("spotifySync.downloaded")
+		: t("spotifySync.new");
+}
 function showAlbum(data) {
 	reset();
 
@@ -185,8 +190,11 @@ onMounted(() => {
 					<th>#</th>
 					<th>{{ t("globals.listTabs.title", 1) }}</th>
 					<th>{{ t("globals.listTabs.artist", 1) }}</th>
-					<th v-if="type === 'playlist'">
+					<th v-if="type === 'playlist' || type === 'spotifyPlaylist'">
 						{{ t("globals.listTabs.album", 1) }}
+					</th>
+					<th v-if="type === 'spotifyPlaylist'">
+						{{ t("spotifySync.status") }}
 					</th>
 					<th>
 						<i class="material-icons">timer</i>
@@ -342,6 +350,17 @@ onMounted(() => {
 						</td>
 						<td>{{ track.artists[0].name }}</td>
 						<td>{{ track.album.name }}</td>
+						<td class="table__cell--small table__cell--center">
+							<span
+								:class="{
+									'spotify-sync-badge': true,
+									'spotify-sync-badge--muted':
+										!track.spotifyDownloadStatus?.downloaded,
+								}"
+							>
+								{{ getSpotifyTrackStatusLabel(track) }}
+							</span>
+						</td>
 						<td>{{ convertDuration(Math.floor(track.duration_ms / 1000)) }}</td>
 						<td>
 							<input

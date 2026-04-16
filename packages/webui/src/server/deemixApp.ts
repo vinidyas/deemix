@@ -354,6 +354,14 @@ export class DeemixApp {
 					this.queue[currentUUID].status = "completed";
 				}
 
+				if (downloadObject instanceof Collection) {
+					try {
+						this.plugins.spotify.recordPlaylistDownload(downloadObject);
+					} catch (e) {
+						logger.error(e);
+					}
+				}
+
 				const savedObject = {
 					...downloadObject.getSlimmedDict(),
 					status: this.queue[currentUUID].status,

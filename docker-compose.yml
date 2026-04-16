@@ -1,10 +1,23 @@
 services:
   deemix:
-    container_name: Deemix
-    build: .
+    container_name: deemixpessoal
+    build:
+      context: .
     restart: unless-stopped
+    environment:
+      PUID: 99
+      PGID: 100
+      TZ: America/Sao_Paulo
+      UMASK_SET: "022"
+      DISABLE_OWNERSHIP_CHECK_MUSIC: "1"
     ports:
-      - 6595:6595
+      - "6596:6595"
     volumes:
-      - "${DEEMIX_CONFIG_PATH}:/config"   # Set the `DEEMIX_CONFIG_PATH` environment variable in the shell where `docker-compose up` is being ran
-      - "${DEEMIX_MUSIC_PATH}:/downloads" # Set the `DEEMIX_MUSIC_PATH` environment variable in the shell where `docker-compose up` is being ran
+      - type: bind
+        source: /mnt/user/appdata/deemixpessoal
+        target: /config
+      - type: bind
+        source: /mnt/remotes/media/musicas
+        target: /downloads
+        bind:
+          propagation: rslave

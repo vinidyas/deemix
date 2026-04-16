@@ -13,11 +13,13 @@ import { getConfigFolder } from "@/utils/localpaths.js";
 import {
 	type Market,
 	SpotifyApi,
-	type MaxInt,
 	type Track as SpotifyTrack,
+	type AccessToken,
+	type IAuthStrategy,
 } from "@spotify/web-api-ts-sdk";
 import { queue } from "async";
 import { Deezer, type DeezerTrack } from "deezer-sdk";
+import { randomBytes } from "crypto";
 import fs from "fs";
 import got from "got";
 import { sep } from "path";
@@ -33,12 +35,129 @@ interface CachedTrack {
 	};
 }
 
+interface SpotifyDownloadHistoryTrack {
+	id: string;
+	uri?: string;
+	name: string;
+	artists: string[];
+	album?: string;
+	deezerId?: string;
+	deezerTitle?: string;
+	path?: string;
+	firstDownloadedAt: string;
+	lastDownloadedAt: string;
+}
+
+interface SpotifyDownloadHistoryPlaylist {
+	id: string;
+	name: string;
+	owner?: string;
+	snapshotId?: string;
+	totalTracks: number;
+	lastSeenAt: string;
+	lastDownloadedAt?: string;
+	downloadedCount: number;
+	tracks: Record<string, SpotifyDownloadHistoryTrack>;
+}
+
+interface SpotifyDownloadHistory {
+	version: 1;
+	playlists: Record<string, SpotifyDownloadHistoryPlaylist>;
+}
+
+interface SpotifySyncTrack {
+	id: string;
+	uri?: string;
+	name: string;
+	artists: string[];
+	album?: string;
+}
+
+interface SpotifyPlaylistSyncData {
+	playlistId: string;
+	playlistName: string;
+	owner?: string;
+	snapshotId?: string;
+	totalTracks: number;
+	queuedTrackIds: string[];
+	skippedTrackIds: string[];
+	tracks: Record<string, SpotifySyncTrack>;
+}
+
+interface SpotifyDownloadStatus {
+	downloaded: boolean;
+	mirrored: boolean;
+	downloadedCount: number;
+	totalTracks: number;
+	lastDownloadedAt?: string;
+}
+
+export interface SpotifyUser {
+	id: string;
+	name?: string | null;
+	picture?: string | null;
+}
+
+class StoredSpotifyAccessTokenStrategy implements IAuthStrategy {
+	constructor(
+		private readonly clientId: string,
+		private accessToken: AccessToken,
+		private readonly refreshAccessToken: (
+			clientId: string,
+			token: AccessToken
+		) => Promise<AccessToken>
+	) {
+		if (!this.accessToken.expires) {
+			this.accessToken.expires = this.calculateExpiry(this.accessToken);
+		}
+	}
+
+	setConfiguration(): void {}
+
+	async getOrCreateAccessToken(): Promise<AccessToken> {
+		if (this.accessToken.expires && this.accessToken.expires <= Date.now()) {
+			this.accessToken = await this.refreshAccessToken(
+				this.clientId,
+				this.accessToken
+			);
+		}
+
+		return this.accessToken;
+	}
+
+	async getAccessToken(): Promise<AccessToken | null> {
+		return this.accessToken;
+	}
+
+	removeAccessToken(): void {
+		this.accessToken = {
+			access_token: "",
+			token_type: "",
+			expires_in: 0,
+			refresh_token: "",
+			expires: 0,
+		};
+	}
+
+	private calculateExpiry(token: AccessToken) {
+		return Date.now() + token.expires_in * 1000;
+	}
+}
+
 export default class SpotifyPlugin extends BasePlugin {
 	credentials: { clientId: string; clientSecret: string };
-	settings: { fallbackSearch: boolean };
+	settings: {
+		fallbackSearch: boolean;
+		accessToken?: AccessToken;
+		user?: SpotifyUser;
+	};
 	enabled: boolean;
 	configFolder: string;
 	sp: SpotifyApi;
+	private authorizationStates: Map<
+		string,
+		{ createdAt: number; redirectUri: string }
+	>;
 
 	constructor(configFolder = undefined) {
 		super();
@@ -47,6 +166,7 @@ export default class SpotifyPlugin extends BasePlugin {
 			fallbackSearch: false,
 		};
 		this.enabled = false;
+		this.authorizationStates = new Map();
 		/* this.sp */
 		this.configFolder = configFolder || getConfigFolder();
 		this.configFolder += `spotify${sep}`;
@@ -197,51 +317,74 @@ export default class SpotifyPlugin extends BasePlugin {
 		const playlistAPI: any = this._convertPlaylistStructure(spotifyPlaylist);
 		playlistAPI.various_artist = await dz.api.get_artist(5080); // Useful for save as compilation
 
-		let tracklistTemp = spotifyPlaylist.tracks.items;
-		while (spotifyPlaylist.tracks.next) {
-			const regExec = /offset=(\d+)&limit=(\d+)/g.exec(
-				spotifyPlaylist.tracks.next
-			);
-			const offset = parseInt(regExec[1]);
-			const limit = parseInt(regExec[2]) as MaxInt<50>;
-
-			const playlistTracks = await this.sp.playlists.getPlaylistItems(
-				link_id,
-				market,
-				undefined,
-				limit,
-				offset
-			);
-
-			spotifyPlaylist.tracks = playlistTracks;
-			tracklistTemp = tracklistTemp.concat(spotifyPlaylist.tracks.items);
-		}
+		const tracklistTemp = await this.getPlaylistItems(link_id, market);
 
 		const tracklist: SpotifyTrack[] = [];
 		tracklistTemp.forEach((item) => {
-			if (!item.track) return; // Skip everything that isn't a track
-			if (item.track.explicit && !playlistAPI.explicit)
-				playlistAPI.explicit = true;
-			tracklist.push(item.track);
+			const track = item.track ?? item.item;
+			if (!track || track.type !== "track") return;
+			if (track.explicit && !playlistAPI.explicit) playlistAPI.explicit = true;
+			tracklist.push(track);
 		});
 		if (!playlistAPI.explicit) playlistAPI.explicit = false;
+		const syncData = this.createPlaylistSyncData(
+			link_id,
+			spotifyPlaylist,
+			tracklist
+		);
+		playlistAPI.spotifySync = syncData;
+		const tracksToDownload = this.filterAlreadyDownloadedTracks(
+			link_id,
+			tracklist
+		);
 
 		return new Convertable({
 			type: "spotify_playlist",
 			id: link_id,
 			bitrate,
-			title: spotifyPlaylist.name,
-			artist: spotifyPlaylist.owner.display_name,
+			title: spotifyPlaylist.name ?? `Spotify Playlist ${link_id}`,
+			artist: spotifyPlaylist.owner?.display_name ?? "",
 			cover: playlistAPI.picture_thumbnail,
 			explicit: playlistAPI.explicit,
-			size: tracklist.length,
+			size: tracksToDownload.length,
 			collection: {
 				tracks: [],
 				playlistAPI,
 			},
 			plugin: "spotify",
-			conversion_data: tracklist,
+			conversion_data: tracksToDownload,
 		});
+	}
+
+	async getPlaylistItems(playlistId: string, market?: Market) {
+		const getPlaylistItemsPage = (offset: number, limit: number) => {
+			const params = new URLSearchParams({
+				limit: limit.toString(),
+				offset: offset.toString(),
+				additional_types: "track",
+			});
+
+			if (market) params.set("market", market);
+
+			return this.sp.makeRequest<any>(
+				"GET",
+				`playlists/${playlistId}/items?${params.toString()}`
+			);
+		};
+
+		let playlistTracks = await getPlaylistItemsPage(0, 50);
+		let tracklist = [...(playlistTracks.items ?? [])];
+
+		while (playlistTracks.next) {
+			const nextUrl = new URL(playlistTracks.next);
+			const offset = parseInt(nextUrl.searchParams.get("offset") ?? "0");
+			const limit = parseInt(nextUrl.searchParams.get("limit") ?? "50");
+
+			playlistTracks = await getPlaylistItemsPage(offset, limit);
+			tracklist = tracklist.concat(playlistTracks.items ?? []);
+		}
+
+		return tracklist;
 	}
 
 	async generatePlaylistItemFromPage(
@@ -278,6 +421,16 @@ export default class SpotifyPlugin extends BasePlugin {
 			);
 			playlistAPI.various_artist = await dz.api.get_artist(5080);
 			playlistAPI.explicit = webPlaylist.tracks.some((track) => track.explicit);
+			const syncData = this.createPlaylistSyncData(
+				link_id,
+				webPlaylist.playlist,
+				webPlaylist.tracks
+			);
+			playlistAPI.spotifySync = syncData;
+			const tracksToDownload = this.filterAlreadyDownloadedTracks(
+				link_id,
+				webPlaylist.tracks
+			);
 
 			return new Convertable({
 				type: "spotify_playlist",
@@ -287,13 +440,13 @@ export default class SpotifyPlugin extends BasePlugin {
 				artist: webPlaylist.playlist.owner.display_name,
 				cover: playlistAPI.picture_thumbnail,
 				explicit: playlistAPI.explicit,
-				size: webPlaylist.tracks.length,
+				size: tracksToDownload.length,
 				collection: {
 					tracks: [],
 					playlistAPI,
 				},
 				plugin: "spotify",
-				conversion_data: webPlaylist.tracks,
+				conversion_data: tracksToDownload,
 			});
 		}
 
@@ -364,6 +517,16 @@ export default class SpotifyPlugin extends BasePlugin {
 		const playlistAPI: any = this._convertPlaylistStructure(playlistLike);
 		playlistAPI.various_artist = await dz.api.get_artist(5080);
 		playlistAPI.explicit = tracklist.some((track) => track.explicit);
+		const syncData = this.createPlaylistSyncData(
+			link_id,
+			playlistLike,
+			tracklist
+		);
+		playlistAPI.spotifySync = syncData;
+		const tracksToDownload = this.filterAlreadyDownloadedTracks(
+			link_id,
+			tracklist
+		);
 
 		return new Convertable({
 			type: "spotify_playlist",
@@ -373,13 +536,13 @@ export default class SpotifyPlugin extends BasePlugin {
 			artist: playlistLike.owner.display_name,
 			cover: playlistAPI.picture_thumbnail,
 			explicit: playlistAPI.explicit,
-			size: tracklist.length,
+			size: tracksToDownload.length,
 			collection: {
 				tracks: [],
 				playlistAPI,
 			},
 			plugin: "spotify",
-			conversion_data: tracklist,
+			conversion_data: tracksToDownload,
 		});
 	}
 
@@ -424,10 +587,11 @@ export default class SpotifyPlugin extends BasePlugin {
 				})
 				.json();
 
-			const trackItems: any[] = Array.isArray(playlist?.tracks?.items)
-				? [...playlist.tracks.items]
+			const playlistItemsPage = playlist?.tracks ?? playlist?.items;
+			const trackItems: any[] = Array.isArray(playlistItemsPage?.items)
+				? [...playlistItemsPage.items]
 				: [];
-			let nextUrl: string | null = playlist?.tracks?.next || null;
+			let nextUrl: string | null = playlistItemsPage?.next || null;
 
 			while (nextUrl) {
 				const page: any = await got
@@ -445,13 +609,18 @@ export default class SpotifyPlugin extends BasePlugin {
 
 			const tracklist: SpotifyTrack[] = [];
 			for (const item of trackItems) {
-				if (!item?.track || typeof item.track.id !== "string") continue;
-				tracklist.push(item.track);
+				const track = item?.track ?? item?.item;
+				if (!track || track.type !== "track" || typeof track.id !== "string")
+					continue;
+				tracklist.push(track);
 			}
 
 			if (!tracklist.length) return null;
-			playlist.tracks.items = trackItems;
-			playlist.tracks.total = tracklist.length;
+			playlist.tracks = {
+				...(playlistItemsPage ?? {}),
+				items: trackItems,
+				total: tracklist.length,
+			};
 
 			return {
 				playlist,
@@ -496,6 +665,209 @@ export default class SpotifyPlugin extends BasePlugin {
 		const parsedCount = Number.parseInt(countMatch[1].replaceAll(",", ""), 10);
 		if (Number.isNaN(parsedCount) || parsedCount <= 0) return null;
 		return parsedCount;
+	}
+
+	createSyncTrack(track: SpotifyTrack): SpotifySyncTrack {
+		return {
+			id: track.id,
+			uri: track.uri,
+			name: track.name,
+			artists: (track.artists ?? []).map((artist) => artist.name),
+			album: track.album?.name,
+		};
+	}
+
+	createPlaylistSyncData(
+		playlistId: string,
+		spotifyPlaylist: any,
+		tracklist: SpotifyTrack[]
+	): SpotifyPlaylistSyncData {
+		const downloadedTrackIds = this.getDownloadedSpotifyTrackIds(playlistId);
+		const tracks: Record<string, SpotifySyncTrack> = {};
+		const queuedTrackIds: string[] = [];
+		const skippedTrackIds: string[] = [];
+
+		for (const track of tracklist) {
+			if (!track?.id) continue;
+			tracks[track.id] = this.createSyncTrack(track);
+			if (downloadedTrackIds.has(track.id)) skippedTrackIds.push(track.id);
+			else queuedTrackIds.push(track.id);
+		}
+
+		return {
+			playlistId,
+			playlistName: spotifyPlaylist?.name ?? `Spotify Playlist ${playlistId}`,
+			owner: spotifyPlaylist?.owner?.display_name,
+			snapshotId: spotifyPlaylist?.snapshot_id,
+			totalTracks: tracklist.length,
+			queuedTrackIds,
+			skippedTrackIds,
+			tracks,
+		};
+	}
+
+	filterAlreadyDownloadedTracks(
+		playlistId: string,
+		tracklist: SpotifyTrack[]
+	): SpotifyTrack[] {
+		const downloadedTrackIds = this.getDownloadedSpotifyTrackIds(playlistId);
+		if (!downloadedTrackIds.size) return tracklist;
+		return tracklist.filter((track) => !downloadedTrackIds.has(track.id));
+	}
+
+	getDownloadedSpotifyTrackIds(playlistId: string): Set<string> {
+		const history = this.loadDownloadHistory();
+		const playlist = history.playlists[playlistId];
+		if (!playlist) return new Set();
+		return new Set(Object.keys(playlist.tracks));
+	}
+
+	getPlaylistDownloadStatus(
+		playlistId: string,
+		totalTracks?: number
+	): SpotifyDownloadStatus {
+		const history = this.loadDownloadHistory();
+		const playlist = history.playlists[playlistId];
+		const knownTotal = totalTracks ?? playlist?.totalTracks ?? 0;
+		const downloadedCount = playlist ? Object.keys(playlist.tracks).length : 0;
+
+		return {
+			downloaded: downloadedCount > 0,
+			mirrored: knownTotal > 0 && downloadedCount >= knownTotal,
+			downloadedCount,
+			totalTracks: knownTotal,
+			lastDownloadedAt: playlist?.lastDownloadedAt,
+		};
+	}
+
+	getSpotifyTrackDownloadStatus(
+		playlistId: string,
+		trackId: string
+	):
+		| (SpotifyDownloadHistoryTrack & { downloaded: true })
+		| { downloaded: false } {
+		const history = this.loadDownloadHistory();
+		const track = history.playlists[playlistId]?.tracks?.[trackId];
+		if (!track) return { downloaded: false };
+		return {
+			...track,
+			downloaded: true,
+		};
+	}
+
+	applyPlaylistDownloadStatus(playlist: any) {
+		if (!playlist?.id) return playlist;
+		const totalTracks =
+			playlist.nb_tracks ??
+			playlist.tracks?.total ??
+			(Array.isArray(playlist.tracks) ? playlist.tracks.length : undefined);
+		playlist.spotifyDownloadStatus = this.getPlaylistDownloadStatus(
+			playlist.id,
+			totalTracks
+		);
+		return playlist;
+	}
+
+	applyTrackDownloadStatus(playlistId: string, track: any) {
+		if (!track?.id) return track;
+		track.spotifyDownloadStatus = this.getSpotifyTrackDownloadStatus(
+			playlistId,
+			track.id
+		);
+		return track;
+	}
+
+	loadDownloadHistory(): SpotifyDownloadHistory {
+		try {
+			const history = JSON.parse(
+				fs.readFileSync(this.getDownloadHistoryPath()).toString()
+			);
+			if (history?.version === 1 && history?.playlists) {
+				return history;
+			}
+		} catch {
+			/* empty */
+		}
+
+		return {
+			version: 1,
+			playlists: {},
+		};
+	}
+
+	saveDownloadHistory(history: SpotifyDownloadHistory) {
+		fs.mkdirSync(this.configFolder, { recursive: true });
+		fs.writeFileSync(
+			this.getDownloadHistoryPath(),
+			JSON.stringify(history, null, 2)
+		);
+	}
+
+	recordPlaylistDownload(downloadObject: Collection) {
+		if (downloadObject.type !== "spotify_playlist") return;
+
+		const spotifySync = downloadObject.collection?.playlistAPI?.spotifySync as
+			| SpotifyPlaylistSyncData
+			| undefined;
+		if (!spotifySync?.playlistId) return;
+
+		const history = this.loadDownloadHistory();
+		const now = new Date().toISOString();
+		const playlist: SpotifyDownloadHistoryPlaylist = {
+			id: spotifySync.playlistId,
+			name: spotifySync.playlistName,
+			owner: spotifySync.owner,
+			snapshotId: spotifySync.snapshotId,
+			totalTracks: spotifySync.totalTracks,
+			lastSeenAt: now,
+			lastDownloadedAt:
+				history.playlists[spotifySync.playlistId]?.lastDownloadedAt,
+			downloadedCount: 0,
+			tracks: history.playlists[spotifySync.playlistId]?.tracks ?? {},
+		};
+
+		const downloadedFilesByDeezerId = new Map<string, any>();
+		for (const file of downloadObject.files ?? []) {
+			const deezerId = file?.data?.id;
+			if (deezerId === undefined || deezerId === null) continue;
+			downloadedFilesByDeezerId.set(String(deezerId), file);
+		}
+
+		let successfulTracks = 0;
+		for (const trackAPI of downloadObject.collection?.tracks ?? []) {
+			const spotifyTrack = (trackAPI as any)?.spotifySync as
+				| SpotifySyncTrack
+				| undefined;
+			if (!spotifyTrack?.id) continue;
+
+			const deezerId = String((trackAPI as any)?.id ?? "");
+			const downloadedFile = downloadedFilesByDeezerId.get(deezerId);
+			if (!downloadedFile) continue;
+
+			const existingTrack = playlist.tracks[spotifyTrack.id];
+			playlist.tracks[spotifyTrack.id] = {
+				id: spotifyTrack.id,
+				uri: spotifyTrack.uri ?? existingTrack?.uri,
+				name: spotifyTrack.name,
+				artists: spotifyTrack.artists,
+				album: spotifyTrack.album,
+				deezerId,
+				deezerTitle: (trackAPI as any)?.title,
+				path: downloadedFile.path,
+				firstDownloadedAt: existingTrack?.firstDownloadedAt ?? now,
+				lastDownloadedAt: now,
+			};
+			successfulTracks += 1;
+		}
+
+		if (successfulTracks > 0) playlist.lastDownloadedAt = now;
+		playlist.downloadedCount = Object.keys(playlist.tracks).length;
+		history.playlists[spotifySync.playlistId] = playlist;
+		this.saveDownloadHistory(history);
+	}
+
+	getDownloadHistoryPath() {
+		return this.configFolder + "download-history.json";
 	}
 
 	getSpotifyErrorStatus(error: any): number | undefined {
@@ -657,9 +1029,11 @@ export default class SpotifyPlugin extends BasePlugin {
 				}
 
 				trackAPI.position = pos + 1;
+				(trackAPI as any).spotifySync = this.createSyncTrack(track);
 				collection[pos] = trackAPI;
 
-				conversionNext += (1 / downloadObject.size) * 100;
+				conversionNext +=
+					downloadObject.size > 0 ? (1 / downloadObject.size) * 100 : 0;
 
 				if (
 					Math.round(conversionNext) !== conversion &&
@@ -701,24 +1075,32 @@ export default class SpotifyPlugin extends BasePlugin {
 		let cover = null;
 		// Mickey: some playlists can be faulty, for example https://open.spotify.com/playlist/7vyEjAGrXOIjqlC8pZRupW
 		if (spotifyPlaylist?.images?.length) cover = spotifyPlaylist.images[0].url;
+		const playlistId = spotifyPlaylist.id;
+		const owner = spotifyPlaylist.owner ?? {};
+		const tracks = spotifyPlaylist.tracks ?? spotifyPlaylist.items ?? {};
+		const spotifyUrl =
+			spotifyPlaylist.external_urls?.spotify ??
+			`https://open.spotify.com/playlist/${playlistId}`;
 
 		const deezerPlaylist = {
-			checksum: spotifyPlaylist.snapshot_id,
-			collaborative: spotifyPlaylist.collaborative,
+			checksum: spotifyPlaylist.snapshot_id ?? playlistId,
+			collaborative: !!spotifyPlaylist.collaborative,
 			creation_date: "XXXX-00-00",
 			creator: {
-				id: spotifyPlaylist.owner.id,
-				name: spotifyPlaylist.owner.display_name,
-				tracklist: spotifyPlaylist.owner.href,
+				id: owner.id ?? "",
+				name: owner.display_name ?? "",
+				tracklist:
+					owner.href ??
+					(owner.id ? `https://api.spotify.com/v1/users/${owner.id}` : ""),
 				type: "user",
 			},
-			description: spotifyPlaylist.description,
+			description: spotifyPlaylist.description ?? "",
 			duration: 0,
 			fans: spotifyPlaylist.followers ? spotifyPlaylist.followers.total : 0,
-			id: spotifyPlaylist.id,
+			id: playlistId,
 			is_loved_track: false,
-			link: spotifyPlaylist.external_urls.spotify,
-			nb_tracks: spotifyPlaylist.tracks.total,
+			link: spotifyUrl,
+			nb_tracks: tracks.total ?? 0,
 			picture: cover,
 			picture_small:
 				cover ||
@@ -735,10 +1117,10 @@ export default class SpotifyPlugin extends BasePlugin {
 			picture_thumbnail:
 				cover ||
 				"https://e-cdns-images.dzcdn.net/images/cover/d41d8cd98f00b204e9800998ecf8427e/75x75-000000-80-0-0.jpg",
-			public: spotifyPlaylist.public,
-			share: spotifyPlaylist.external_urls.spotify,
-			title: spotifyPlaylist.name,
-			tracklist: spotifyPlaylist.tracks.href,
+			public: spotifyPlaylist.public ?? false,
+			share: spotifyUrl,
+			title: spotifyPlaylist.name ?? "",
+			tracklist: tracks.href ?? "",
 			type: "playlist",
 		};
 
@@ -813,14 +1195,28 @@ export default class SpotifyPlugin extends BasePlugin {
 	}
 
 	setSettings(newSettings) {
+		const nextClientId = (newSettings.clientId ?? "").trim();
+		const nextClientSecret = (newSettings.clientSecret ?? "").trim();
+		const credentialsChanged =
+			nextClientId !== this.credentials.clientId ||
+			nextClientSecret !== this.credentials.clientSecret;
+		const previousAccessToken = credentialsChanged
+			? undefined
+			: this.settings.accessToken;
+		const previousUser = credentialsChanged ? undefined : this.settings.user;
+
 		this.credentials = {
-			clientId: newSettings.clientId,
-			clientSecret: newSettings.clientSecret,
+			clientId: nextClientId,
+			clientSecret: nextClientSecret,
 		};
 		const settings = { ...newSettings };
 		delete settings.clientId;
 		delete settings.clientSecret;
-		this.settings = settings;
+		this.settings = {
+			fallbackSearch: !!settings.fallbackSearch,
+			accessToken: settings.accessToken ?? previousAccessToken,
+			user: settings.user ?? previousUser,
+		};
 	}
 
 	loadCache() {
@@ -851,17 +1247,196 @@ export default class SpotifyPlugin extends BasePlugin {
 	checkCredentials() {
 		if (
 			this.credentials.clientId === "" ||
-			this.credentials.clientSecret === ""
+			this.credentials.clientSecret === "" ||
+			!this.settings.accessToken?.access_token ||
+			!this.settings.accessToken?.refresh_token
 		) {
 			this.enabled = false;
 			return;
 		}
 
-		this.sp = SpotifyApi.withClientCredentials(
-			this.credentials.clientId,
-			this.credentials.clientSecret
+		this.sp = new SpotifyApi(
+			new StoredSpotifyAccessTokenStrategy(
+				this.credentials.clientId,
+				this.settings.accessToken,
+				async (clientId, token) => {
+					const refreshedToken = await this.refreshAccessToken(clientId, token);
+					this.settings.accessToken = refreshedToken;
+					this.saveSettings();
+					return refreshedToken;
+				}
+			)
 		);
 		this.enabled = true;
+	}
+
+	createAuthorizationState(redirectUri: string) {
+		const state = randomBytes(16).toString("hex");
+		this.authorizationStates.set(state, { createdAt: Date.now(), redirectUri });
+		return state;
+	}
+
+	consumeAuthorizationState(state: string) {
+		this.clearExpiredAuthorizationStates();
+		const authorizationState = this.authorizationStates.get(state);
+		if (!authorizationState) return null;
+		this.authorizationStates.delete(state);
+		return authorizationState.redirectUri;
+	}
+
+	getRedirectUri(port: string | number) {
+		return `http://127.0.0.1:${port}/spotify/callback`;
+	}
+
+	getAuthorizationUrl(redirectUri: string, state: string) {
+		const params = new URLSearchParams({
+			client_id: this.credentials.clientId,
+			response_type: "code",
+			redirect_uri: redirectUri,
+			scope: "playlist-read-private playlist-read-collaborative",
+			state,
+		});
+
+		return `https://accounts.spotify.com/authorize?${params.toString()}`;
+	}
+
+	async completeAuthorization(code: string, redirectUri: string) {
+		const token = await this.exchangeAuthorizationCode(code, redirectUri);
+		this.settings.accessToken = token;
+		this.checkCredentials();
+		const userProfile = await this.sp.currentUser.profile();
+		this.settings.user = {
+			id: userProfile.id,
+			name: userProfile.display_name,
+			picture: userProfile.images?.[0]?.url ?? null,
+		};
+		this.saveSettings();
+		return this.settings.user;
+	}
+
+	getUser() {
+		return this.settings.user ?? null;
+	}
+
+	async getCurrentUserPlaylistsFromWebApi() {
+		return this.getPagedSpotifyItems(
+			"https://api.spotify.com/v1/me/playlists?limit=50"
+		);
+	}
+
+	async getUserPlaylistsFromWebApi(userId: string) {
+		return this.getPagedSpotifyItems(
+			`https://api.spotify.com/v1/users/${userId}/playlists?limit=50`
+		);
+	}
+
+	async getPlaylistDetailsFromWebApi(playlistId: string) {
+		return this.getSpotifyJson<any>(
+			`https://api.spotify.com/v1/playlists/${playlistId}`
+		);
+	}
+
+	private async getPagedSpotifyItems(firstUrl: string) {
+		const items: any[] = [];
+		let nextUrl: string | null = firstUrl;
+
+		while (nextUrl) {
+			const page = await this.getSpotifyJson<any>(nextUrl);
+			items.push(...(page?.items ?? []));
+			nextUrl = page?.next ?? null;
+		}
+
+		return items;
+	}
+
+	private async getSpotifyJson<T>(url: string) {
+		const accessToken = await this.getValidAccessToken();
+		return got
+			.get(url, {
+				headers: {
+					Authorization: `Bearer ${accessToken}`,
+				},
+				https: { rejectUnauthorized: false },
+				responseType: "json",
+				timeout: { request: 10000 },
+			})
+			.json<T>();
+	}
+
+	private async getValidAccessToken() {
+		if (!this.settings.accessToken?.access_token) {
+			throw new PluginNotEnabledError("Spotify");
+		}
+
+		const expiresAt = this.settings.accessToken.expires ?? 0;
+		const expiresSoon = expiresAt <= Date.now() + 60 * 1000;
+		if (expiresSoon) {
+			this.settings.accessToken = await this.refreshAccessToken(
+				this.credentials.clientId,
+				this.settings.accessToken
+			);
+			this.saveSettings();
+		}
+
+		return this.settings.accessToken.access_token;
+	}
+
+	private async exchangeAuthorizationCode(code: string, redirectUri: string) {
+		const token = await got
+			.post("https://accounts.spotify.com/api/token", {
+				form: {
+					grant_type: "authorization_code",
+					code,
+					redirect_uri: redirectUri,
+				},
+				headers: this.getAuthorizationHeaders(),
+			})
+			.json<AccessToken>();
+
+		return this.normalizeAccessToken(token);
+	}
+
+	private async refreshAccessToken(_clientId: string, token: AccessToken) {
+		const refreshedToken = await got
+			.post("https://accounts.spotify.com/api/token", {
+				form: {
+					grant_type: "refresh_token",
+					refresh_token: token.refresh_token,
+				},
+				headers: this.getAuthorizationHeaders(),
+			})
+			.json<AccessToken>();
+
+		return this.normalizeAccessToken({
+			...refreshedToken,
+			refresh_token: refreshedToken.refresh_token ?? token.refresh_token,
+		});
+	}
+
+	private normalizeAccessToken(token: AccessToken): AccessToken {
+		return {
+			...token,
+			expires: Date.now() + token.expires_in * 1000,
+		};
+	}
+
+	private getAuthorizationHeaders() {
+		const credentials = Buffer.from(
+			`${this.credentials.clientId}:${this.credentials.clientSecret}`
+		).toString("base64");
+
+		return {
+			Authorization: `Basic ${credentials}`,
+		};
+	}
+
+	private clearExpiredAuthorizationStates() {
+		const expiresAt = Date.now() - 10 * 60 * 1000;
+		this.authorizationStates.forEach((authorizationState, state) => {
+			if (authorizationState.createdAt < expiresAt) {
+				this.authorizationStates.delete(state);
+			}
+		});
 	}
 
 	getCredentials() {

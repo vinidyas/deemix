@@ -241,6 +241,8 @@ const pt_br = {
 		updateAvailable: "Uma atualização está disponível!",
 		wrongSpotifyUsername:
 			"{username} não é um nome de usuário válido do Spotify",
+		spotifyPlaylistsUnavailable:
+			"Não foi possível atualizar as playlists do Spotify.",
 	},
 	settings: {
 		title: "Configurações",
@@ -475,6 +477,16 @@ const pt_br = {
 			clientID: "Spotify clientID",
 			clientSecret: "Spotify Client Secret",
 			username: "Usuário do Spotify",
+			callbackUrl: "URI de redirecionamento do Spotify",
+			callbackHint:
+				"Adicione esta URI exata no app do Spotify Developers antes de conectar.",
+			callbackCopied: "URI de redirecionamento do Spotify copiada",
+			connect: "Conectar com Spotify",
+			connectedAs: "Conta do Spotify conectada",
+			connectionSuccess: "Conexão com Spotify validada",
+			connectionFailed: "Falha na conexão com Spotify",
+			missingCredentials:
+				"Informe o Spotify Client ID e o Spotify Client Secret primeiro",
 			question: "Como habilitar os Recursos do Spotify?",
 			howTo: {
 				prologue: {
@@ -536,6 +548,12 @@ const pt_br = {
 	},
 	tracklist: {
 		downloadSelection: "Baixar seleção",
+	},
+	spotifySync: {
+		status: "Status",
+		downloaded: "Baixada",
+		mirrored: "Espelhada",
+		new: "Nova",
 	},
 };
 

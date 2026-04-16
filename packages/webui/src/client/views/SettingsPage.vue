@@ -51,8 +51,6 @@ const lastCredentials = ref({
 	clientSecret: "",
 	fallbackSearch: false,
 });
-const lastUser = ref("");
-const spotifyUser = ref(localStorage.getItem("spotifyUser") || "");
 const storedAccountNum = localStorage.getItem("accountNum");
 const accountNum = ref(
 	isNaN(parseInt(storedAccountNum)) ? parseInt(storedAccountNum) : 0
@@ -72,6 +70,14 @@ const userLicense = computed(() => {
 	else if (user.value.can_stream_hq) return "Premium";
 	else return "Free";
 });
+const spotifyCallbackUrl = computed(() => {
+	const url = new URL(
+		`${window.location.origin}${location.base}spotify/callback`
+	);
+	url.hostname = "127.0.0.1";
+	return url.href;
+});
+const spotifyConnectedUser = computed(() => loginStore.spotifyUser);
 
 onMounted(async () => {
 	const { settingsData, defaultSettingsData, spotifyCredentials } =
@@ -81,10 +87,7 @@ onMounted(async () => {
 	spotifyFeatures.value = spotifyCredentials;
 	initSettings(settingsData, spotifyCredentials);
 
-	if (spotifyUser.value) {
-		lastUser.value = spotifyUser.value;
-		socket.emit("update_userSpotifyPlaylists", spotifyUser.value);
-	}
+	await handleSpotifyConnectionResult();
 
 	socket.on("updateSettings", updateSettings);
 	// socket.on('accountChanged', accountChanged)
@@ -129,16 +132,6 @@ function saveSettings() {
 	appInfoStore.setShowSearchButton(appInfoRef.showSearchButton);
 	appInfoStore.setPreviewVolume(appInfoRef.previewVolume);
 
-	let changed = false;
-
-	if (lastUser.value !== spotifyUser.value) {
-		// force cloning without linking
-		lastUser.value = (" " + spotifyUser.value).slice(1);
-		localStorage.setItem("spotifyUser", lastUser.value);
-		loginStore.setSpotifyUserId(lastUser.value);
-		changed = true;
-	}
-
 	socket.emit("saveSettings", {
 		settings: settings.value,
 		spotifySettings: {
@@ -146,10 +139,50 @@ function saveSettings() {
 			clientSecret: spotifyFeatures.value.clientSecret,
 			fallbackSearch: spotifyFeatures.value.fallbackSearch,
 		},
-		spotifyUser: changed ? lastUser.value : false,
 	});
 
 	// this.refreshSpotifyStatus()
+}
+function copySpotifyCallbackUrl() {
+	copyToClipboard(spotifyCallbackUrl.value);
+	toast(t("settings.spotify.callbackCopied"), "assignment");
+}
+async function connectSpotify() {
+	if (!spotifyFeatures.value.clientId || !spotifyFeatures.value.clientSecret) {
+		toast(t("settings.spotify.missingCredentials"), "close");
+		return;
+	}
+
+	const data = await postToServer("spotifyConnect", {
+		clientId: spotifyFeatures.value.clientId,
+		clientSecret: spotifyFeatures.value.clientSecret,
+		fallbackSearch: spotifyFeatures.value.fallbackSearch,
+		redirectUri: spotifyCallbackUrl.value,
+	});
+
+	if (data?.authUrl) {
+		window.location.href = data.authUrl;
+		return;
+	}
+
+	toast(t("settings.spotify.connectionFailed"), "close");
+}
+async function handleSpotifyConnectionResult() {
+	const url = new URL(window.location.href);
+	const spotifyStatus = url.searchParams.get("spotify");
+
+	if (!spotifyStatus) return;
+
+	url.searchParams.delete("spotify");
+	window.history.replaceState({}, document.title, url.toString());
+
+	await loginStore.refreshSpotifyStatus();
+
+	if (spotifyStatus === "connected") {
+		toast(t("settings.spotify.connectionSuccess"), "done");
+	} else {
+		toast(t("settings.spotify.connectionFailed"), "close");
+	}
 }
 function selectDownloadFolder() {
 	window.api.send("selectDownloadFolder", settings.value.downloadLocation);
@@ -1355,11 +1388,26 @@ function canDownload(bitrate: number) {
 			</div>
 
 			<div class="input-group">
-				<p class="input-group-text">{{ t("settings.spotify.username") }}</p>
+				<p class="input-group-text">{{ t("settings.spotify.callbackUrl") }}</p>
 				<p class="input-group-text text-sm text-gray-400">
-					{{ t("settings.spotify.usernameHint") }}
+					{{ t("settings.spotify.callbackHint") }}
 				</p>
-				<input v-model="spotifyUser" type="text" />
+				<div class="flex items-center">
+					<input :value="spotifyCallbackUrl" readonly type="text" />
+					<button
+						class="btn btn-primary btn-only-icon ml-2"
+						@click="copySpotifyCallbackUrl"
+					>
+						<i class="material-icons">assignment</i>
+					</button>
+				</div>
+			</div>
+
+			<div v-if="spotifyConnectedUser.id" class="input-group">
+				<p class="input-group-text">{{ t("settings.spotify.connectedAs") }}</p>
+				<p>
+					{{ spotifyConnectedUser.name || spotifyConnectedUser.id }}
+				</p>
 			</div>
 
 			<label class="with-checkbox">
@@ -1368,6 +1416,10 @@ function canDownload(bitrate: number) {
 					t("settings.downloads.fallbackSearch")
 				}}</span>
 			</label>
+
+			<button class="btn btn-primary" @click="connectSpotify">
+				{{ t("settings.spotify.connect") }}
+			</button>
 		</BaseAccordion>
 
 		<footer class="bg-background-main">

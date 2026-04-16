@@ -46,29 +46,60 @@ const handler: ApiHandler["handler"] = async (req, res) => {
 				break;
 			}
 			const sp = deemix.plugins.spotify.sp;
-			const playlist = await sp.playlists.getPlaylist(list_id);
-			let tracklist = playlist.tracks.items;
-			while (playlist.tracks.next) {
-				const regExec = /offset=(\d+)&limit=(\d+)/g.exec(playlist.tracks.next);
-				const offset = regExec![1];
-				const limit = regExec![2];
-				const playlistTracks = await sp.playlists.getPlaylistItems(
-					list_id,
-					undefined,
-					undefined,
-					limit,
-					offset
-				);
+			try {
+				const playlist = await sp.playlists.getPlaylist(list_id);
+				const tracklist =
+					await deemix.plugins.spotify.getPlaylistItems(list_id);
+				playlist.tracks = tracklist
+					.map((item: any) => item.track ?? item.item)
+					.filter(Boolean)
+					.map((track: any) => {
+						track.selected = false;
+						return deemix.plugins.spotify.applyTrackDownloadStatus(
+							list_id,
+							track
+						);
+					});
+				deemix.plugins.spotify.applyPlaylistDownloadStatus(playlist);
+				res.send(playlist);
+			} catch {
+				const webPlaylist =
+					await deemix.plugins.spotify.getPlaylistFromWebApi(list_id);
+				if (webPlaylist) {
+					webPlaylist.playlist.tracks = webPlaylist.tracks.map((track) => {
+						track.selected = false;
+						return deemix.plugins.spotify.applyTrackDownloadStatus(
+							list_id,
+							track
+						);
+					});
+					deemix.plugins.spotify.applyPlaylistDownloadStatus(
+						webPlaylist.playlist
+					);
+					res.send(webPlaylist.playlist);
+					break;
+				}
 
-				playlist.tracks = playlistTracks;
-				tracklist = tracklist.concat(playlist.tracks.items);
+				res.send({
+					collaborative: false,
+					description: "",
+					external_urls: {
+						spotify: `https://open.spotify.com/playlist/${list_id}`,
+					},
+					followers: { total: 0, href: null },
+					id: list_id,
+					images: [],
+					name: "Spotify playlist is not accessible",
+					owner: {
+						display_name: "Spotify",
+						id: null,
+					},
+					public: false,
+					tracks: [],
+					type: "playlist",
+					uri: null,
+				});
 			}
-			tracklist.forEach((item: any, i: number) => {
-				tracklist[i] = item.track;
-				tracklist[i].selected = false;
-			});
-			playlist.tracks = tracklist;
-			res.send(playlist);
 			break;
 		}
 		default: {

@@ -93,4 +93,16 @@ export interface SpotifySettings {
 	clientId?: string;
 	clientSecret?: string;
 	fallbackSearch?: boolean;
+	accessToken?: {
+		access_token: string;
+		token_type: string;
+		expires_in: number;
+		refresh_token: string;
+		expires?: number;
+	};
+	user?: {
+		id: string;
+		name?: string | null;
+		picture?: string | null;
+	};
 }

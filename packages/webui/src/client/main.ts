@@ -50,6 +50,7 @@ async function startApp() {
 
 	appInfoStore.setAppInfo(connectResponse.update);
 	loginStore.setSpotifyStatus(spotifyStatus);
+	loginStore.setSpotifyUser(connectResponse.spotifyUser);
 
 	let arl = localStorage.getItem("arl");
 	let accessToken = localStorage.getItem("accessToken");

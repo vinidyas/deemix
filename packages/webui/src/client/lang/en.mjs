@@ -199,6 +199,7 @@ const en = {
 		checkingUpdates: "Checking for updates...",
 		updateAvailable: "An update is available!",
 		wrongSpotifyUsername: "{username} is not a valid spotify username",
+		spotifyPlaylistsUnavailable: "Could not refresh Spotify playlists.",
 	},
 	settings: {
 		title: "Settings",
@@ -430,6 +431,15 @@ const en = {
 			username: "Spotify Username",
 			usernameHint:
 				"Your public username used for grabbing your public playlists. Not the username you use to sign in.",
+			callbackUrl: "Spotify Redirect URI",
+			callbackHint:
+				"Add this exact URI in the Spotify Developers app before connecting.",
+			callbackCopied: "Spotify Redirect URI copied to clipboard",
+			connect: "Connect with Spotify",
+			connectedAs: "Connected Spotify account",
+			connectionSuccess: "Spotify connection validated",
+			connectionFailed: "Spotify connection failed",
+			missingCredentials: "Add your Spotify Client ID and Client Secret first",
 			question: "How do I enable Spotify Features?",
 			howTo: {
 				prologue: {
@@ -491,6 +501,12 @@ const en = {
 	},
 	tracklist: {
 		downloadSelection: "Download selection",
+	},
+	spotifySync: {
+		status: "Status",
+		downloaded: "Downloaded",
+		mirrored: "Mirrored",
+		new: "New",
 	},
 };
 

@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { sep } from "path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { Collection } from "@/download-objects/Collection.js";
 import SpotifyPlugin from "./spotify.js";
 
 const { gotGetMock } = vi.hoisted(() => ({ gotGetMock: vi.fn() }));
@@ -10,6 +14,34 @@ vi.mock("got", () => {
 			get: gotGetMock,
 		},
 	};
+});
+
+const tempFolders: string[] = [];
+
+function createTempPlugin() {
+	const tempFolder = mkdtempSync(`${tmpdir()}${sep}deemix-spotify-test-`);
+	tempFolders.push(tempFolder);
+	return new SpotifyPlugin(`${tempFolder}${sep}`).setup();
+}
+
+function createSpotifyTrack(id: string, name: string) {
+	return {
+		id,
+		uri: `spotify:track:${id}`,
+		type: "track",
+		explicit: false,
+		name,
+		artists: [{ name: "Artist" }],
+		album: { name: "Album" },
+	} as any;
+}
+
+afterEach(() => {
+	gotGetMock.mockReset();
+	while (tempFolders.length) {
+		const tempFolder = tempFolders.pop();
+		if (tempFolder) rmSync(tempFolder, { recursive: true, force: true });
+	}
 });
 
 describe("SpotifyPlugin playlist fallback", () => {
@@ -49,17 +81,11 @@ describe("SpotifyPlugin playlist fallback", () => {
 			return { body: mainHtml };
 		});
 
-		const plugin = new SpotifyPlugin("/tmp/deemix-spotify-test/").setup();
+		const plugin = createTempPlugin();
 		plugin.getPlaylistFromWebApi = vi.fn().mockResolvedValue(null);
 		plugin.sp = {
 			tracks: {
-				get: vi.fn(async (id: string) => ({
-					id,
-					explicit: false,
-					name: `Track ${id}`,
-					artists: [{ name: "Artist" }],
-					album: { name: "Album" },
-				})),
+				get: vi.fn(async (id: string) => createSpotifyTrack(id, `Track ${id}`)),
 			},
 		} as any;
 		plugin.enabled = true;
@@ -79,5 +105,75 @@ describe("SpotifyPlugin playlist fallback", () => {
 			expect.stringContaining("/embed/playlist/"),
 			expect.any(Object)
 		);
+	});
+});
+
+describe("SpotifyPlugin download history", () => {
+	it("records successful playlist downloads and skips them next time", () => {
+		const plugin = createTempPlugin();
+		const downloadedTrack = createSpotifyTrack("SPOTIFY001", "Downloaded");
+		const failedTrack = createSpotifyTrack("SPOTIFY002", "Failed");
+		const syncData = plugin.createPlaylistSyncData(
+			"playlist-1",
+			{
+				name: "Sync Playlist",
+				owner: { display_name: "Vinicius" },
+				snapshot_id: "snapshot-1",
+			},
+			[downloadedTrack, failedTrack]
+		);
+
+		const downloadObject = new Collection({
+			type: "spotify_playlist",
+			id: "playlist-1",
+			bitrate: 3,
+			title: "Sync Playlist",
+			artist: "Vinicius",
+			cover: "",
+			size: 2,
+			downloaded: 1,
+			failed: 1,
+			files: [{ data: { id: 123 }, path: "/music/downloaded.mp3" }],
+			collection: {
+				playlistAPI: { spotifySync: syncData },
+				tracks: [
+					{
+						id: 123,
+						title: "Downloaded Deezer Track",
+						artist: { name: "Artist" },
+						spotifySync: syncData.tracks.SPOTIFY001,
+					},
+					{
+						id: "0",
+						title: "Failed Deezer Track",
+						artist: { name: "Artist" },
+						spotifySync: syncData.tracks.SPOTIFY002,
+					},
+				],
+			},
+		});
+
+		plugin.recordPlaylistDownload(downloadObject);
+
+		const history = plugin.loadDownloadHistory();
+		expect(history.playlists["playlist-1"].downloadedCount).toBe(1);
+		expect(history.playlists["playlist-1"].tracks.SPOTIFY001.path).toBe(
+			"/music/downloaded.mp3"
+		);
+		expect(history.playlists["playlist-1"].tracks.SPOTIFY002).toBeUndefined();
+
+		const nextTracks = plugin.filterAlreadyDownloadedTracks("playlist-1", [
+			downloadedTrack,
+			failedTrack,
+		]);
+		expect(nextTracks.map((track) => track.id)).toEqual(["SPOTIFY002"]);
+
+		const nextSyncData = plugin.createPlaylistSyncData(
+			"playlist-1",
+			{ name: "Sync Playlist" },
+			[downloadedTrack, failedTrack]
+		);
+		expect(nextSyncData.skippedTrackIds).toEqual(["SPOTIFY001"]);
+		expect(nextSyncData.queuedTrackIds).toEqual(["SPOTIFY002"]);
 	});
 });

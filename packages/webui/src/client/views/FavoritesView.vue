@@ -47,7 +47,7 @@ watch(isRefreshingFavorites, (newVal, oldVal) => {
 });
 
 const onRefreshFavorites = () => {
-	refreshFavorites({});
+	refreshFavorites({ force: true });
 };
 
 function playPausePreview(e) {
@@ -77,6 +77,18 @@ function addToQueue(e) {
 	sendAddToQueue(e.currentTarget.dataset.link);
 }
 
+function getSpotifyPlaylistStatusLabel(release) {
+	const status = release.spotifyDownloadStatus;
+	if (!status?.downloaded) return "";
+
+	const label = status.mirrored
+		? t("spotifySync.mirrored")
+		: t("spotifySync.downloaded");
+
+	if (!status.totalTracks) return label;
+	return `${label} · ${status.downloadedCount}/${status.totalTracks}`;
+}
+
 function getActiveRelease(tab?: (typeof state.tabs)[number]) {
 	if (!tab) tab = state.activeTab;
 
@@ -84,8 +96,9 @@ function getActiveRelease(tab?: (typeof state.tabs)[number]) {
 
 	switch (tab) {
 		case "playlist":
-			toDownload = favoritePlaylists.value;
-			toDownload.concat(favoriteSpotifyPlaylists);
+			toDownload = favoritePlaylists.value.concat(
+				favoriteSpotifyPlaylists.value
+			);
 			break;
 		case "album":
 			toDownload = favoriteAlbums.value;
@@ -128,17 +141,16 @@ const activeTabEmpty = computed(() => {
 	<div>
 		<h1 class="mb-8 text-5xl">
 			{{ t("favorites.title") }}
-			<div
-				ref="reloadButton"
+			<button
 				aria-label="reload"
-				class="inline-block cursor-pointer"
-				role="button"
-				@click="onRefreshFavorites"
+				class="inline-flex cursor-pointer items-center border-0 bg-transparent p-0 text-inherit"
+				type="button"
+				@click.stop.prevent="onRefreshFavorites"
 			>
 				<i :class="{ spin: isRefreshingFavorites }" class="material-icons"
 					>sync</i
 				>
-			</div>
+			</button>
 		</h1>
 
 		<BaseTabs>
@@ -218,7 +230,11 @@ const activeTabEmpty = computed(() => {
 				<div
 					v-for="release in favoriteSpotifyPlaylists"
 					:key="release.id"
-					class="release"
+					:class="{
+						release: true,
+						'release--spotify-downloaded':
+							release.spotifyDownloadStatus?.downloaded,
+					}"
 				>
 					<router-link
 						v-slot="{ navigate }"
@@ -238,6 +254,16 @@ const activeTabEmpty = computed(() => {
 								@click.stop="addToQueue"
 							/>
 							<p class="primary-text">{{ release.title }}</p>
+							<p
+								v-if="release.spotifyDownloadStatus?.downloaded"
+								:class="{
+									'spotify-sync-badge': true,
+									'spotify-sync-badge--mirrored':
+										release.spotifyDownloadStatus?.mirrored,
+								}"
+							>
+								{{ getSpotifyPlaylistStatusLabel(release) }}
+							</p>
 						</div>
 					</router-link>
 

@@ -18,6 +18,42 @@
 	width: 156px;
 }
 
+.release--spotify-downloaded {
+	margin: -6px;
+	border-radius: 8px;
+	background: rgba(30, 144, 255, 0.08);
+	padding: 6px;
+	box-shadow: inset 0 0 0 1px rgba(30, 144, 255, 0.45);
+}
+
+.spotify-sync-badge {
+	display: inline-flex;
+	align-items: center;
+	margin-top: 6px;
+	border: 1px solid rgba(30, 144, 255, 0.55);
+	border-radius: 8px;
+	background: rgba(30, 144, 255, 0.12);
+	padding: 3px 7px;
+	max-width: 100%;
+	color: var(--foreground);
+	font-weight: 700;
+	font-size: 11px;
+	line-height: 1;
+	white-space: nowrap;
+}
+
+.spotify-sync-badge--mirrored {
+	border-color: rgba(255, 214, 36, 0.65);
+	background: rgba(255, 214, 36, 0.16);
+}
+
+.spotify-sync-badge--muted {
+	opacity: 0.64;
+	border-color: var(--table-highlight);
+	background: transparent;
+	font-weight: 600;
+}
+
 .spin {
 	animation: spin 500ms infinite ease-out reverse;
 }

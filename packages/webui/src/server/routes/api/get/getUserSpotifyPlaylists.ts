@@ -1,3 +1,4 @@
+import { logger } from "../../../helpers/logger.js";
 import { type ApiHandler } from "../../../types.js";
 
 const path: ApiHandler["path"] = "/getUserSpotifyPlaylists";
@@ -7,36 +8,35 @@ const handler: ApiHandler["handler"] = async (req, res) => {
 	const deemix = req.app.get("deemix");
 
 	if (deemix.plugins.spotify.enabled) {
-		const sp = deemix.plugins.spotify.sp;
-		const usernames = req.query.spotifyUser.split(/[\s,]+/);
+		logger.info("Refreshing Spotify playlists");
 		data = [];
-		let playlistList: any;
-		playlistList = [];
-		for (let username of usernames) {
-			username = username.trim();
-			let playlists;
+		let playlistList: any[] = [];
+
+		try {
 			try {
-				playlists = await sp.playlists.getUsersPlaylists(username);
-			} catch {
-				res.send({ error: "wrongSpotifyUsername", username });
-				return;
-			}
-			playlistList = playlistList.concat(playlists.items);
-			while (playlists.next) {
-				const regExec = /offset=(\d+)/g.exec(playlists.next);
-				const offset = regExec![1];
-				// const limit = regExec![2]
-				playlists = await sp.playlists.getUsersPlaylists(
-					username,
-					undefined,
-					offset
+				playlistList =
+					await deemix.plugins.spotify.getCurrentUserPlaylistsFromWebApi();
+			} catch (currentUserError) {
+				const spotifyUser = deemix.plugins.spotify.getUser();
+				if (!spotifyUser?.id) throw currentUserError;
+				logger.info("Falling back to Spotify user playlists endpoint");
+				playlistList = await deemix.plugins.spotify.getUserPlaylistsFromWebApi(
+					spotifyUser.id
 				);
-				playlistList = playlistList.concat(playlists.items);
 			}
+		} catch (error) {
+			logger.error(error);
+			res.send({ error: "spotifyPlaylistsUnavailable" });
+			return;
 		}
-		playlistList.forEach((playlist: any) => {
-			data.push(deemix.plugins.spotify._convertPlaylistStructure(playlist));
-		});
+		logger.info(`Spotify playlists loaded: ${playlistList.length}`);
+		for (const playlist of playlistList) {
+			data.push(
+				deemix.plugins.spotify.applyPlaylistDownloadStatus(
+					deemix.plugins.spotify._convertPlaylistStructure(playlist)
+				)
+			);
+		}
 	} else {
 		data = { error: "spotifyNotEnabled" };
 	}

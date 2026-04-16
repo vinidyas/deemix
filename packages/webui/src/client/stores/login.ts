@@ -95,9 +95,23 @@ export const useLoginStore = defineStore("login", {
 		setSpotifyUserId(spotifyUserId: LoginState["spotifyUser"]["id"]) {
 			this.spotifyUser.id = spotifyUserId;
 		},
+		setSpotifyUser(spotifyUser: LoginState["spotifyUser"] | null) {
+			this.spotifyUser = spotifyUser ?? {
+				id: null,
+				name: null,
+				picture: null,
+			};
+
+			if (this.spotifyUser.id) {
+				localStorage.setItem("spotifyUser", this.spotifyUser.id);
+			} else {
+				localStorage.removeItem("spotifyUser");
+			}
+		},
 		async refreshSpotifyStatus() {
 			const status = await fetchData("spotifyStatus");
 			this.spotifyStatus = status.spotifyEnabled ? "enabled" : "disabled";
+			this.setSpotifyUser(status.spotifyUser);
 		},
 	},
 });
