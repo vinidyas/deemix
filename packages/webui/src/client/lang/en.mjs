@@ -433,7 +433,7 @@ const en = {
 				"Your public username used for grabbing your public playlists. Not the username you use to sign in.",
 			callbackUrl: "Spotify Redirect URI",
 			callbackHint:
-				"Add this exact URI in the Spotify Developers app before connecting.",
+				"Add this exact URI in the Spotify Developers app before connecting. Use your public HTTPS address when running behind a reverse proxy.",
 			callbackCopied: "Spotify Redirect URI copied to clipboard",
 			connect: "Connect with Spotify",
 			connectedAs: "Connected Spotify account",

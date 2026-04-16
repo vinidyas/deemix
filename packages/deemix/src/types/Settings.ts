@@ -92,6 +92,7 @@ export interface Settings {
 export interface SpotifySettings {
 	clientId?: string;
 	clientSecret?: string;
+	redirectUri?: string;
 	fallbackSearch?: boolean;
 	accessToken?: {
 		access_token: string;

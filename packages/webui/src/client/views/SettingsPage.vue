@@ -44,11 +44,13 @@ const defaultSettings = ref({});
 const spotifyFeatures = ref({
 	clientId: "",
 	clientSecret: "",
+	redirectUri: "",
 	fallbackSearch: false,
 });
 const lastCredentials = ref({
 	clientId: "",
 	clientSecret: "",
+	redirectUri: "",
 	fallbackSearch: false,
 });
 const storedAccountNum = localStorage.getItem("accountNum");
@@ -70,12 +72,22 @@ const userLicense = computed(() => {
 	else if (user.value.can_stream_hq) return "Premium";
 	else return "Free";
 });
-const spotifyCallbackUrl = computed(() => {
+const defaultSpotifyCallbackUrl = computed(() => {
 	const url = new URL(
 		`${window.location.origin}${location.base}spotify/callback`
 	);
-	url.hostname = "127.0.0.1";
+	if (url.hostname === "localhost" || url.hostname === "0.0.0.0") {
+		url.hostname = "127.0.0.1";
+	}
 	return url.href;
+});
+const spotifyCallbackUrl = computed({
+	get() {
+		return spotifyFeatures.value.redirectUri || defaultSpotifyCallbackUrl.value;
+	},
+	set(value: string) {
+		spotifyFeatures.value.redirectUri = value.trim();
+	},
 });
 const spotifyConnectedUser = computed(() => loginStore.spotifyUser);
 
@@ -137,6 +149,7 @@ function saveSettings() {
 		spotifySettings: {
 			clientId: spotifyFeatures.value.clientId,
 			clientSecret: spotifyFeatures.value.clientSecret,
+			redirectUri: spotifyCallbackUrl.value,
 			fallbackSearch: spotifyFeatures.value.fallbackSearch,
 		},
 	});
@@ -1393,7 +1406,7 @@ function canDownload(bitrate: number) {
 					{{ t("settings.spotify.callbackHint") }}
 				</p>
 				<div class="flex items-center">
-					<input :value="spotifyCallbackUrl" readonly type="text" />
+					<input v-model="spotifyCallbackUrl" type="text" />
 					<button
 						class="btn btn-primary btn-only-icon ml-2"
 						@click="copySpotifyCallbackUrl"

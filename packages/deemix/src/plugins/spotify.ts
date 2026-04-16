@@ -148,6 +148,7 @@ export default class SpotifyPlugin extends BasePlugin {
 	credentials: { clientId: string; clientSecret: string };
 	settings: {
 		fallbackSearch: boolean;
+		redirectUri?: string;
 		accessToken?: AccessToken;
 		user?: SpotifyUser;
 	};
@@ -164,6 +165,7 @@ export default class SpotifyPlugin extends BasePlugin {
 		this.credentials = { clientId: "", clientSecret: "" };
 		this.settings = {
 			fallbackSearch: false,
+			redirectUri: "",
 		};
 		this.enabled = false;
 		this.authorizationStates = new Map();
@@ -1214,6 +1216,7 @@ export default class SpotifyPlugin extends BasePlugin {
 		delete settings.clientSecret;
 		this.settings = {
 			fallbackSearch: !!settings.fallbackSearch,
+			redirectUri: settings.redirectUri ?? "",
 			accessToken: settings.accessToken ?? previousAccessToken,
 			user: settings.user ?? previousUser,
 		};
@@ -1285,7 +1288,9 @@ export default class SpotifyPlugin extends BasePlugin {
 	}
 
 	getRedirectUri(port: string | number) {
-		return `http://127.0.0.1:${port}/spotify/callback`;
+		return (
+			this.settings.redirectUri || `http://127.0.0.1:${port}/spotify/callback`
+		);
 	}
 
 	getAuthorizationUrl(redirectUri: string, state: string) {

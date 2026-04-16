@@ -479,7 +479,7 @@ const pt_br = {
 			username: "Usuário do Spotify",
 			callbackUrl: "URI de redirecionamento do Spotify",
 			callbackHint:
-				"Adicione esta URI exata no app do Spotify Developers antes de conectar.",
+				"Adicione esta URI exata no app do Spotify Developers antes de conectar. Use o endereço HTTPS público quando estiver atrás de proxy reverso.",
 			callbackCopied: "URI de redirecionamento do Spotify copiada",
 			connect: "Conectar com Spotify",
 			connectedAs: "Conta do Spotify conectada",

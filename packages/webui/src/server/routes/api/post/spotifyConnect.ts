@@ -14,12 +14,6 @@ const handler: ApiHandler["handler"] = (req, res) => {
 	}
 
 	const spotifyPlugin = deemix.plugins.spotify;
-	spotifyPlugin.saveSettings({
-		clientId,
-		clientSecret,
-		fallbackSearch: !!fallbackSearch,
-	});
-
 	redirectUri = redirectUri || spotifyPlugin.getRedirectUri(port);
 	let redirectUrl: URL;
 	try {
@@ -29,14 +23,24 @@ const handler: ApiHandler["handler"] = (req, res) => {
 		return;
 	}
 
+	const isLocalHttp =
+		redirectUrl.protocol === "http:" && redirectUrl.hostname === "127.0.0.1";
+	const isHttps = redirectUrl.protocol === "https:";
+
 	if (
-		redirectUrl.protocol !== "http:" ||
-		redirectUrl.hostname !== "127.0.0.1" ||
+		(!isLocalHttp && !isHttps) ||
 		redirectUrl.pathname !== "/spotify/callback"
 	) {
 		res.status(400).send({ error: "invalidSpotifyRedirectUri" });
 		return;
 	}
+
+	spotifyPlugin.saveSettings({
+		clientId,
+		clientSecret,
+		redirectUri,
+		fallbackSearch: !!fallbackSearch,
+	});
 
 	const state = spotifyPlugin.createAuthorizationState(redirectUri);
 
