@@ -59,12 +59,20 @@ const handler: ApiHandler["handler"] = async (req, res) => {
 							list_id,
 							track
 						);
-					});
+				});
 				deemix.plugins.spotify.applyPlaylistDownloadStatus(playlist);
 				res.send(playlist);
 			} catch {
-				const webPlaylist =
+				let webPlaylist =
 					await deemix.plugins.spotify.getPlaylistFromWebApi(list_id);
+				if (!webPlaylist) {
+					try {
+						webPlaylist =
+							await deemix.plugins.spotify.getPlaylistFromPage(list_id);
+					} catch {
+						webPlaylist = null;
+					}
+				}
 				if (webPlaylist) {
 					webPlaylist.playlist.tracks = webPlaylist.tracks.map((track) => {
 						track.selected = false;

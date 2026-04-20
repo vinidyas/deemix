@@ -22,7 +22,7 @@ import { Deezer, type DeezerTrack } from "deezer-sdk";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import got from "got";
-import { sep } from "path";
+import { isAbsolute, relative, resolve, sep } from "path";
 import BasePlugin from "./base.js";
 
 interface CachedTrack {
@@ -298,7 +298,7 @@ export default class SpotifyPlugin extends BasePlugin {
 			spotifyPlaylist = await this.sp.playlists.getPlaylist(link_id);
 		} catch (e) {
 			// Some Spotify playlists require a market context to resolve.
-			if (this.getSpotifyErrorStatus(e) === 404) {
+			if (this.shouldFallbackToSpotifyPage(e)) {
 				market = "US";
 				try {
 					spotifyPlaylist = await this.sp.playlists.getPlaylist(
@@ -306,7 +306,7 @@ export default class SpotifyPlugin extends BasePlugin {
 						market
 					);
 				} catch (retryError) {
-					if (this.getSpotifyErrorStatus(retryError) === 404) {
+					if (this.shouldFallbackToSpotifyPage(retryError)) {
 						return this.generatePlaylistItemFromPage(dz, link_id, bitrate);
 					}
 					throw retryError;
@@ -319,7 +319,15 @@ export default class SpotifyPlugin extends BasePlugin {
 		const playlistAPI: any = this._convertPlaylistStructure(spotifyPlaylist);
 		playlistAPI.various_artist = await dz.api.get_artist(5080); // Useful for save as compilation
 
-		const tracklistTemp = await this.getPlaylistItems(link_id, market);
+		let tracklistTemp;
+		try {
+			tracklistTemp = await this.getPlaylistItems(link_id, market);
+		} catch (e) {
+			if (this.shouldFallbackToSpotifyPage(e)) {
+				return this.generatePlaylistItemFromPage(dz, link_id, bitrate);
+			}
+			throw e;
+		}
 
 		const tracklist: SpotifyTrack[] = [];
 		tracklistTemp.forEach((item) => {
@@ -394,6 +402,42 @@ export default class SpotifyPlugin extends BasePlugin {
 		link_id: string,
 		bitrate: number
 	) {
+		const webPlaylist =
+			(await this.getPlaylistFromWebApi(link_id)) ??
+			(await this.getPlaylistFromPage(link_id));
+		const playlistAPI: any = this._convertPlaylistStructure(webPlaylist.playlist);
+		playlistAPI.various_artist = await dz.api.get_artist(5080);
+		playlistAPI.explicit = webPlaylist.tracks.some((track) => track.explicit);
+		const syncData = this.createPlaylistSyncData(
+			link_id,
+			webPlaylist.playlist,
+			webPlaylist.tracks
+		);
+		playlistAPI.spotifySync = syncData;
+		const tracksToDownload = this.filterAlreadyDownloadedTracks(
+			link_id,
+			webPlaylist.tracks
+		);
+
+		return new Convertable({
+			type: "spotify_playlist",
+			id: link_id,
+			bitrate,
+			title: webPlaylist.playlist.name,
+			artist: webPlaylist.playlist.owner.display_name,
+			cover: playlistAPI.picture_thumbnail,
+			explicit: playlistAPI.explicit,
+			size: tracksToDownload.length,
+			collection: {
+				tracks: [],
+				playlistAPI,
+			},
+			plugin: "spotify",
+			conversion_data: tracksToDownload,
+		});
+	}
+
+	async getPlaylistFromPage(link_id: string) {
 		const playlistUrl = `https://open.spotify.com/playlist/${link_id}`;
 		const page = await got.get(playlistUrl, {
 			https: { rejectUnauthorized: false },
@@ -415,42 +459,6 @@ export default class SpotifyPlugin extends BasePlugin {
 		const expectedCount = this.getExpectedPlaylistTrackCount(
 			descriptionMatch?.[1] || ""
 		);
-
-		const webPlaylist = await this.getPlaylistFromWebApi(link_id);
-		if (webPlaylist) {
-			const playlistAPI: any = this._convertPlaylistStructure(
-				webPlaylist.playlist
-			);
-			playlistAPI.various_artist = await dz.api.get_artist(5080);
-			playlistAPI.explicit = webPlaylist.tracks.some((track) => track.explicit);
-			const syncData = this.createPlaylistSyncData(
-				link_id,
-				webPlaylist.playlist,
-				webPlaylist.tracks
-			);
-			playlistAPI.spotifySync = syncData;
-			const tracksToDownload = this.filterAlreadyDownloadedTracks(
-				link_id,
-				webPlaylist.tracks
-			);
-
-			return new Convertable({
-				type: "spotify_playlist",
-				id: link_id,
-				bitrate,
-				title: webPlaylist.playlist.name,
-				artist: webPlaylist.playlist.owner.display_name,
-				cover: playlistAPI.picture_thumbnail,
-				explicit: playlistAPI.explicit,
-				size: tracksToDownload.length,
-				collection: {
-					tracks: [],
-					playlistAPI,
-				},
-				plugin: "spotify",
-				conversion_data: tracksToDownload,
-			});
-		}
 
 		const trackIdSet = this.extractTrackIdsFromHtml(html);
 
@@ -516,36 +524,10 @@ export default class SpotifyPlugin extends BasePlugin {
 			name: titleMatch?.[1] || `Spotify Playlist ${link_id}`,
 		};
 
-		const playlistAPI: any = this._convertPlaylistStructure(playlistLike);
-		playlistAPI.various_artist = await dz.api.get_artist(5080);
-		playlistAPI.explicit = tracklist.some((track) => track.explicit);
-		const syncData = this.createPlaylistSyncData(
-			link_id,
-			playlistLike,
-			tracklist
-		);
-		playlistAPI.spotifySync = syncData;
-		const tracksToDownload = this.filterAlreadyDownloadedTracks(
-			link_id,
-			tracklist
-		);
-
-		return new Convertable({
-			type: "spotify_playlist",
-			id: link_id,
-			bitrate,
-			title: playlistLike.name,
-			artist: playlistLike.owner.display_name,
-			cover: playlistAPI.picture_thumbnail,
-			explicit: playlistAPI.explicit,
-			size: tracksToDownload.length,
-			collection: {
-				tracks: [],
-				playlistAPI,
-			},
-			plugin: "spotify",
-			conversion_data: tracksToDownload,
-		});
+		return {
+			playlist: playlistLike,
+			tracks: tracklist,
+		};
 	}
 
 	async getSpotifyWebAccessToken() {
@@ -718,10 +700,24 @@ export default class SpotifyPlugin extends BasePlugin {
 	}
 
 	getDownloadedSpotifyTrackIds(playlistId: string): Set<string> {
+		return new Set(Object.keys(this.getAvailableSpotifyTracks(playlistId)));
+	}
+
+	getAvailableSpotifyTracks(
+		playlistId: string
+	): Record<string, SpotifyDownloadHistoryTrack> {
 		const history = this.loadDownloadHistory();
 		const playlist = history.playlists[playlistId];
-		if (!playlist) return new Set();
-		return new Set(Object.keys(playlist.tracks));
+		if (!playlist) return {};
+
+		const downloadLocation = this.getConfiguredDownloadLocation();
+		const availableTracks: Record<string, SpotifyDownloadHistoryTrack> = {};
+		for (const [trackId, track] of Object.entries(playlist.tracks ?? {})) {
+			if (this.isSpotifyTrackDownloadAvailable(track, downloadLocation)) {
+				availableTracks[trackId] = track;
+			}
+		}
+		return availableTracks;
 	}
 
 	getPlaylistDownloadStatus(
@@ -731,7 +727,9 @@ export default class SpotifyPlugin extends BasePlugin {
 		const history = this.loadDownloadHistory();
 		const playlist = history.playlists[playlistId];
 		const knownTotal = totalTracks ?? playlist?.totalTracks ?? 0;
-		const downloadedCount = playlist ? Object.keys(playlist.tracks).length : 0;
+		const downloadedCount = Object.keys(
+			this.getAvailableSpotifyTracks(playlistId)
+		).length;
 
 		return {
 			downloaded: downloadedCount > 0,
@@ -750,7 +748,9 @@ export default class SpotifyPlugin extends BasePlugin {
 		| { downloaded: false } {
 		const history = this.loadDownloadHistory();
 		const track = history.playlists[playlistId]?.tracks?.[trackId];
-		if (!track) return { downloaded: false };
+		if (!track || !this.isSpotifyTrackDownloadAvailable(track)) {
+			return { downloaded: false };
+		}
 		return {
 			...track,
 			downloaded: true,
@@ -825,7 +825,7 @@ export default class SpotifyPlugin extends BasePlugin {
 			lastDownloadedAt:
 				history.playlists[spotifySync.playlistId]?.lastDownloadedAt,
 			downloadedCount: 0,
-			tracks: history.playlists[spotifySync.playlistId]?.tracks ?? {},
+			tracks: this.getAvailableSpotifyTracks(spotifySync.playlistId),
 		};
 
 		const downloadedFilesByDeezerId = new Map<string, any>();
@@ -872,6 +872,47 @@ export default class SpotifyPlugin extends BasePlugin {
 		return this.configFolder + "download-history.json";
 	}
 
+	getMainSettingsPath() {
+		return resolve(this.configFolder, "..", "config.json");
+	}
+
+	getConfiguredDownloadLocation() {
+		try {
+			const settings = JSON.parse(
+				fs.readFileSync(this.getMainSettingsPath()).toString()
+			);
+			if (typeof settings?.downloadLocation === "string") {
+				return settings.downloadLocation;
+			}
+		} catch {
+			/* empty */
+		}
+		return undefined;
+	}
+
+	isSpotifyTrackDownloadAvailable(
+		track: SpotifyDownloadHistoryTrack,
+		downloadLocation = this.getConfiguredDownloadLocation()
+	) {
+		if (!track?.path || !fs.existsSync(track.path)) return false;
+		return this.isPathInCurrentDownloadLocation(track.path, downloadLocation);
+	}
+
+	isPathInCurrentDownloadLocation(
+		path: string,
+		downloadLocation = this.getConfiguredDownloadLocation()
+	) {
+		if (!downloadLocation) return true;
+
+		const relativePath = relative(resolve(downloadLocation), resolve(path));
+		return (
+			relativePath === "" ||
+			(relativePath !== ".." &&
+				!relativePath.startsWith(`..${sep}`) &&
+				!isAbsolute(relativePath))
+		);
+	}
+
 	getSpotifyErrorStatus(error: any): number | undefined {
 		const directStatus =
 			error?.status ??
@@ -888,6 +929,11 @@ export default class SpotifyPlugin extends BasePlugin {
 		if (codeMatch?.[1]) return Number.parseInt(codeMatch[1], 10);
 
 		return undefined;
+	}
+
+	shouldFallbackToSpotifyPage(error: any) {
+		const status = this.getSpotifyErrorStatus(error);
+		return status === 403 || status === 404;
 	}
 
 	async getTrack(track_id: string, spotifyTrack?: SpotifyTrack) {

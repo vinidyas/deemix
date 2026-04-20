@@ -17,7 +17,7 @@ services:
         source: /mnt/user/appdata/deemixpessoal
         target: /config
       - type: bind
-        source: /mnt/remotes/media/musicas
+        source: /mnt/remotes/media/spotify_imports
         target: /downloads
         bind:
           propagation: rslave

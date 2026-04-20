@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { sep } from "path";
+import { resolve, sep } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Collection } from "@/download-objects/Collection.js";
@@ -22,6 +22,14 @@ function createTempPlugin() {
 	const tempFolder = mkdtempSync(`${tmpdir()}${sep}deemix-spotify-test-`);
 	tempFolders.push(tempFolder);
 	return new SpotifyPlugin(`${tempFolder}${sep}`).setup();
+}
+
+function setDownloadLocation(plugin: SpotifyPlugin, downloadLocation: string) {
+	mkdirSync(downloadLocation, { recursive: true });
+	writeFileSync(
+		resolve(plugin.configFolder, "..", "config.json"),
+		JSON.stringify({ downloadLocation }, null, 2)
+	);
 }
 
 function createSpotifyTrack(id: string, name: string) {
@@ -111,6 +119,11 @@ describe("SpotifyPlugin playlist fallback", () => {
 describe("SpotifyPlugin download history", () => {
 	it("records successful playlist downloads and skips them next time", () => {
 		const plugin = createTempPlugin();
+		const downloadLocation = resolve(plugin.configFolder, "..", "music");
+		const downloadedPath = `${downloadLocation}${sep}downloaded.mp3`;
+		setDownloadLocation(plugin, downloadLocation);
+		writeFileSync(downloadedPath, "");
+
 		const downloadedTrack = createSpotifyTrack("SPOTIFY001", "Downloaded");
 		const failedTrack = createSpotifyTrack("SPOTIFY002", "Failed");
 		const syncData = plugin.createPlaylistSyncData(
@@ -133,7 +146,7 @@ describe("SpotifyPlugin download history", () => {
 			size: 2,
 			downloaded: 1,
 			failed: 1,
-			files: [{ data: { id: 123 }, path: "/music/downloaded.mp3" }],
+			files: [{ data: { id: 123 }, path: downloadedPath }],
 			collection: {
 				playlistAPI: { spotifySync: syncData },
 				tracks: [
@@ -158,7 +171,7 @@ describe("SpotifyPlugin download history", () => {
 		const history = plugin.loadDownloadHistory();
 		expect(history.playlists["playlist-1"].downloadedCount).toBe(1);
 		expect(history.playlists["playlist-1"].tracks.SPOTIFY001.path).toBe(
-			"/music/downloaded.mp3"
+			downloadedPath
 		);
 		expect(history.playlists["playlist-1"].tracks.SPOTIFY002).toBeUndefined();
 
@@ -175,5 +188,70 @@ describe("SpotifyPlugin download history", () => {
 		);
 		expect(nextSyncData.skippedTrackIds).toEqual(["SPOTIFY001"]);
 		expect(nextSyncData.queuedTrackIds).toEqual(["SPOTIFY002"]);
+	});
+
+	it("allows a playlist to be downloaded again when the destination changes", () => {
+		const plugin = createTempPlugin();
+		const oldDownloadLocation = resolve(plugin.configFolder, "..", "old-music");
+		const newDownloadLocation = resolve(plugin.configFolder, "..", "new-music");
+		const oldDownloadedPath = `${oldDownloadLocation}${sep}downloaded.mp3`;
+		setDownloadLocation(plugin, oldDownloadLocation);
+		writeFileSync(oldDownloadedPath, "");
+
+		const downloadedTrack = createSpotifyTrack("SPOTIFY001", "Downloaded");
+		const syncData = plugin.createPlaylistSyncData(
+			"playlist-1",
+			{ name: "Sync Playlist" },
+			[downloadedTrack]
+		);
+
+		const downloadObject = new Collection({
+			type: "spotify_playlist",
+			id: "playlist-1",
+			bitrate: 3,
+			title: "Sync Playlist",
+			artist: "Vinicius",
+			cover: "",
+			size: 1,
+			downloaded: 1,
+			failed: 0,
+			files: [{ data: { id: 123 }, path: oldDownloadedPath }],
+			collection: {
+				playlistAPI: { spotifySync: syncData },
+				tracks: [
+					{
+						id: 123,
+						title: "Downloaded Deezer Track",
+						artist: { name: "Artist" },
+						spotifySync: syncData.tracks.SPOTIFY001,
+					},
+				],
+			},
+		});
+
+		plugin.recordPlaylistDownload(downloadObject);
+		expect(
+			plugin.filterAlreadyDownloadedTracks("playlist-1", [downloadedTrack])
+		).toEqual([]);
+		expect(plugin.getPlaylistDownloadStatus("playlist-1", 1)).toMatchObject({
+			downloaded: true,
+			mirrored: true,
+			downloadedCount: 1,
+		});
+
+		setDownloadLocation(plugin, newDownloadLocation);
+		expect(
+			plugin
+				.filterAlreadyDownloadedTracks("playlist-1", [downloadedTrack])
+				.map((track) => track.id)
+		).toEqual(["SPOTIFY001"]);
+		expect(plugin.getPlaylistDownloadStatus("playlist-1", 1)).toMatchObject({
+			downloaded: false,
+			mirrored: false,
+			downloadedCount: 0,
+		});
+		expect(
+			plugin.getSpotifyTrackDownloadStatus("playlist-1", "SPOTIFY001")
+		).toEqual({ downloaded: false });
 	});
 });
